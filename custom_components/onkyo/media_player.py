@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 from typing import Any
 
 import eiscp
@@ -81,7 +82,6 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 )
 
 TIMEOUT_MESSAGE = "Timeout waiting for response."
-
 
 ATTR_HDMI_OUTPUT = "hdmi_output"
 ATTR_PRESET = "preset"
@@ -189,7 +189,7 @@ def setup_platform(
 
     if CONF_HOST in config and (host := config[CONF_HOST]) not in KNOWN_HOSTS:
         try:
-            receiver = eiscp.eISCP(host)
+            receiver = eISCP(host)
             hosts.append(
                 OnkyoDevice(
                     receiver,
@@ -254,14 +254,24 @@ class OnkyoDevice(MediaPlayerEntity):
     ):
         """Initialize the Onkyo Receiver."""
         self._receiver = receiver
+        self._host = getattr(receiver, 'host', None)
+        self._port = getattr(receiver, 'port', None)
+        # Set TCP keepalive on the socket
+        try:
+            sock = self._receiver.command_socket
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 300)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 60)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
+        except Exception:
+            _LOGGER.debug("Could not set TCP keepalive options for %s", name or self._host)
+
         self._attr_is_volume_muted = False
         self._attr_volume_level = 0
         self._attr_state = MediaPlayerState.OFF
         if name:
-            # not discovered
             self._attr_name = name
         else:
-            # discovered
             self._attr_unique_id = (
                 f"{receiver.info['model_name']}_{receiver.info['identifier']}"
             )
@@ -277,18 +287,36 @@ class OnkyoDevice(MediaPlayerEntity):
         self._audio_info_supported = True
         self._video_info_supported = True
 
-    def command(self, command):
-        """Run an eiscp command and catch connection errors."""
+    def command(self, cmd: str):
+        """Run an eiscp command, reconnecting on socket errors."""
         try:
-            result = self._receiver.command(command)
-        except (ValueError, OSError, AttributeError, AssertionError):
-            if self._receiver.command_socket:
-                self._receiver.command_socket = None
-                _LOGGER.debug("Resetting connection to %s", self.name)
+            result = self._receiver.command(cmd)
+        except (ValueError, OSError, AttributeError, AssertionError) as err:
+            _LOGGER.warning("Command %r failed (%s), reconnecting…", cmd, err)
+            try:
+                self._receiver.disconnect()
+            except Exception:
+                pass
+            # re-open a fresh connection
+            if self._port:
+                self._receiver = eISCP(self._host, self._port)
             else:
-                _LOGGER.info("%s is disconnected. Attempting to reconnect", self.name)
-            return False
-        _LOGGER.debug("Result for %s: %s", command, result)
+                self._receiver = eISCP(self._host)
+            # reapply keepalive
+            try:
+                sock = self._receiver.command_socket
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 300)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 60)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
+            except Exception:
+                _LOGGER.debug("Could not set TCP keepalive on reconnect for %s", self._attr_name)
+            try:
+                result = self._receiver.command(cmd)
+            except Exception as err2:
+                _LOGGER.error("Reconnect attempt also failed: %s", err2)
+                return False
+        _LOGGER.debug("Result for %s: %s", cmd, result)
         return result
 
     def update(self) -> None:
@@ -310,9 +338,6 @@ class OnkyoDevice(MediaPlayerEntity):
         volume_raw = self.command("volume query")
         mute_raw = self.command("audio-muting query")
         current_source_raw = self.command("input-selector query")
-        # If the following command is sent to a device with only one HDMI out,
-        # the display shows 'Not Available'.
-        # We avoid this by checking if HDMI out is supported
         if self._hdmi_out_supported:
             hdmi_out_raw = self.command("hdmi-output-selector query")
         else:
@@ -341,7 +366,6 @@ class OnkyoDevice(MediaPlayerEntity):
             del self._attr_extra_state_attributes[ATTR_PRESET]
 
         self._attr_is_volume_muted = bool(mute_raw[1] == "on")
-        # AMP_VOL / (MAX_RECEIVER_VOL * (MAX_VOL / 100))
         self._attr_volume_level = volume_raw[1] / (
             self._receiver_max_volume * self._max_volume / 100
         )
@@ -357,15 +381,7 @@ class OnkyoDevice(MediaPlayerEntity):
         self.command("system-power standby")
 
     def set_volume_level(self, volume: float) -> None:
-        """Set volume level, input is range 0..1.
-
-        However full volume on the amp is usually far too loud so allow the user to
-        specify the upper range with CONF_MAX_VOLUME. We change as per max_volume
-        set by user. This means that if max volume is 80 then full volume in HA will
-        give 80% volume on the receiver. Then we convert that to the correct scale
-        for the receiver.
-        """
-        #        HA_VOL * (MAX VOL / 100) * MAX_RECEIVER_VOL
+        """Set volume level, input is range 0..1."""
         self.command(
             "volume"
             f" {int(volume * (self._max_volume / 100) * self._receiver_max_volume)}"
@@ -380,7 +396,7 @@ class OnkyoDevice(MediaPlayerEntity):
         self.command("volume level-down")
 
     def mute_volume(self, mute: bool) -> None:
-        """Mute (true) or unmute (false) media player."""
+        """Mute or unmute the media player."""
         if mute:
             self.command("audio-muting on")
         else:
@@ -482,19 +498,14 @@ class OnkyoDeviceZone(OnkyoDevice):
         mute_raw = self.command(f"zone{self._zone}.muting=query")
         current_source_raw = self.command(f"zone{self._zone}.selector=query")
         preset_raw = self.command(f"zone{self._zone}.preset=query")
-        # If we received a source value, but not a volume value
-        # it's likely this zone permanently does not support volume.
         if current_source_raw and not volume_raw:
             self._supports_volume = False
 
         if not (volume_raw and mute_raw and current_source_raw):
             return
 
-        # It's possible for some players to have zones set to HDMI with
-        # no sound control. In this case, the string `N/A` is returned.
         self._supports_volume = isinstance(volume_raw[1], (float, int))
 
-        # eiscp can return string or tuple. Make everything tuples.
         if isinstance(current_source_raw[1], str):
             current_source_tuples = (current_source_raw[0], (current_source_raw[1],))
         else:
@@ -511,7 +522,6 @@ class OnkyoDeviceZone(OnkyoDevice):
         elif ATTR_PRESET in self._attr_extra_state_attributes:
             del self._attr_extra_state_attributes[ATTR_PRESET]
         if self._supports_volume:
-            # AMP_VOL / (MAX_RECEIVER_VOL * (MAX_VOL / 100))
             self._attr_volume_level = volume_raw[1] / (
                 self._receiver_max_volume * self._max_volume / 100
             )
@@ -528,15 +538,7 @@ class OnkyoDeviceZone(OnkyoDevice):
         self.command(f"zone{self._zone}.power=standby")
 
     def set_volume_level(self, volume: float) -> None:
-        """Set volume level, input is range 0..1.
-
-        However full volume on the amp is usually far too loud so allow the user to
-        specify the upper range with CONF_MAX_VOLUME. We change as per max_volume
-        set by user. This means that if max volume is 80 then full volume in HA
-        will give 80% volume on the receiver. Then we convert that to the correct
-        scale for the receiver.
-        """
-        # HA_VOL * (MAX VOL / 100) * MAX_RECEIVER_VOL
+        """Set volume level, input is range 0..1."""
         self.command(
             f"zone{self._zone}.volume={int(volume * (self._max_volume / 100) * self._receiver_max_volume)}"
         )
@@ -550,7 +552,7 @@ class OnkyoDeviceZone(OnkyoDevice):
         self.command(f"zone{self._zone}.volume=level-down")
 
     def mute_volume(self, mute: bool) -> None:
-        """Mute (true) or unmute (false) media player."""
+        """Mute or unmute the media player."""
         if mute:
             self.command(f"zone{self._zone}.muting=on")
         else:
