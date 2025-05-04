@@ -132,46 +132,32 @@ def _tuple_get(tup, index, default=None):
 
 
 def determine_zones(receiver):
-    """Determine what zones are available for the receiver."""
+    """Determine available zones for the receiver without crashing on parse errors."""
     out = {"zone2": False, "zone3": False}
 
-    # Check Zone 2 capability
-    try:
-        _LOGGER.debug("Checking for zone 2 capability via raw command")
-        response = None
+    def _check_zone(cmd_code: str, na_code: str, zone_key: str):
         try:
-            response = receiver.raw("ZPWQSTN")
-        except AssertionError as err:
-            _LOGGER.debug("Zone 2 raw parse failed (%s), assuming not available", err)
-        if response and isinstance(response, tuple) and response[1] != "ZPWN/A":
-            out["zone2"] = True
-        else:
-            _LOGGER.debug("Zone 2 not available or N/A: %s", response)
-    except ValueError as error:
-        if str(error) != TIMEOUT_MESSAGE:
-            raise
-        _LOGGER.debug("Zone 2 timed out, assuming no functionality")
+            _LOGGER.debug("Checking %s via raw(%s)", zone_key, cmd_code)
+            try:
+                resp = receiver.raw(cmd_code)
+            except Exception as err:
+                _LOGGER.debug("Raw %s failed (%s), assuming not available", cmd_code, err)
+                return False
+            # resp expected tuple like (prefix, payload)
+            if isinstance(resp, tuple) and len(resp) >= 2 and resp[1] != na_code:
+                return True
+            _LOGGER.debug("%s not available or N/A: %s", zone_key, resp)
+            return False
+        except ValueError as err:
+            if str(err) != TIMEOUT_MESSAGE:
+                raise
+            _LOGGER.debug("%s query timed out, assuming not available", zone_key)
+            return False
 
-    # Check Zone 3 capability
-    try:
-        _LOGGER.debug("Checking for zone 3 capability via raw command")
-        response = None
-        try:
-            response = receiver.raw("PW3QSTN")
-        except AssertionError as err:
-            _LOGGER.debug("Zone 3 raw parse failed (%s), assuming not available", err)
-        if response and isinstance(response, tuple) and response[1] != "PW3N/A":
-            out["zone3"] = True
-        else:
-            _LOGGER.debug("Zone 3 not available or N/A: %s", response)
-    except ValueError as error:
-        if str(error) != TIMEOUT_MESSAGE:
-            raise
-        _LOGGER.debug("Zone 3 timed out, assuming no functionality")
-    except AssertionError:
-        _LOGGER.error("Zone 3 detection assertion error")
-
+    out["zone2"] = _check_zone("ZPWQSTN", "ZPWN/A", "zone2")
+    out["zone3"] = _check_zone("PW3QSTN", "PW3N/A", "zone3")
     return out
+
 
 def setup_platform(
     hass: HomeAssistant,
