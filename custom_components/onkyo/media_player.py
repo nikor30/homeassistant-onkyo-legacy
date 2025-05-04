@@ -134,6 +134,7 @@ def _tuple_get(tup, index, default=None):
 def determine_zones(receiver):
     """Determine what zones are available for the receiver."""
     out = {"zone2": False, "zone3": False}
+
     # Check Zone 2 capability
     try:
         _LOGGER.debug("Checking for zone 2 capability via raw command")
@@ -171,7 +172,6 @@ def determine_zones(receiver):
         _LOGGER.error("Zone 3 detection assertion error")
 
     return out
-
 
 def setup_platform(
     hass: HomeAssistant,
