@@ -134,30 +134,41 @@ def _tuple_get(tup, index, default=None):
 def determine_zones(receiver):
     """Determine what zones are available for the receiver."""
     out = {"zone2": False, "zone3": False}
+    # Check Zone 2 capability
     try:
-        _LOGGER.debug("Checking for zone 2 capability")
-        response = receiver.raw("ZPWQSTN")
-        if response != "ZPWN/A":  # Zone 2 Available
+        _LOGGER.debug("Checking for zone 2 capability via raw command")
+        response = None
+        try:
+            response = receiver.raw("ZPWQSTN")
+        except AssertionError as err:
+            _LOGGER.debug("Zone 2 raw parse failed (%s), assuming not available", err)
+        if response and isinstance(response, tuple) and response[1] != "ZPWN/A":
             out["zone2"] = True
         else:
-            _LOGGER.debug("Zone 2 not available")
+            _LOGGER.debug("Zone 2 not available or N/A: %s", response)
     except ValueError as error:
         if str(error) != TIMEOUT_MESSAGE:
             raise
         _LOGGER.debug("Zone 2 timed out, assuming no functionality")
+
+    # Check Zone 3 capability
     try:
-        _LOGGER.debug("Checking for zone 3 capability")
-        response = receiver.raw("PW3QSTN")
-        if response != "PW3N/A":
+        _LOGGER.debug("Checking for zone 3 capability via raw command")
+        response = None
+        try:
+            response = receiver.raw("PW3QSTN")
+        except AssertionError as err:
+            _LOGGER.debug("Zone 3 raw parse failed (%s), assuming not available", err)
+        if response and isinstance(response, tuple) and response[1] != "PW3N/A":
             out["zone3"] = True
         else:
-            _LOGGER.debug("Zone 3 not available")
+            _LOGGER.debug("Zone 3 not available or N/A: %s", response)
     except ValueError as error:
         if str(error) != TIMEOUT_MESSAGE:
             raise
         _LOGGER.debug("Zone 3 timed out, assuming no functionality")
     except AssertionError:
-        _LOGGER.error("Zone 3 detection failed")
+        _LOGGER.error("Zone 3 detection assertion error")
 
     return out
 
