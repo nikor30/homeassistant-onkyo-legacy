@@ -162,8 +162,48 @@ def setup_platform(hass: HomeAssistant, config: ConfigType, add_entities: AddEnt
             if zones["zone3"]:
                 hosts.append(OnkyoDeviceZone("3", receiver, config.get(CONF_SOURCES), name=f"{config[CONF_NAME]} Zone 3", max_volume=config.get(CONF_MAX_VOLUME), receiver_max_volume=config.get(CONF_RECEIVER_MAX_VOLUME)))
         except OSError:
-            _LOGGER.error("Unable to connect to receiver at %s", host)
-    else:
+            _LOGGER.warning("Direct connect to %s failed, falling back to discovery", host)
+            # Attempt discovery fallback
+            for recv in eISCP.discover():
+                if recv.host == host and recv.host not in KNOWN_HOSTS:
+                    _LOGGER.info("Found receiver %s via discovery", host)
+                    hosts.append(
+                        OnkyoDevice(
+                            recv,
+                            config.get(CONF_SOURCES),
+                            name=config.get(CONF_NAME),
+                            max_volume=config.get(CONF_MAX_VOLUME),
+                            receiver_max_volume=config.get(CONF_RECEIVER_MAX_VOLUME),
+                        )
+                    )
+                    KNOWN_HOSTS.append(recv.host)
+                    try:
+                        zones = determine_zones(recv)
+                    except Exception as err:
+                        _LOGGER.error("Zone detection failed on discovery fallback: %s", err)
+                        zones = {"zone2": False, "zone3": False}
+                    if zones.get("zone2"):
+                        hosts.append(OnkyoDeviceZone(
+                            "2",
+                            recv,
+                            config.get(CONF_SOURCES),
+                            name=f"{config[CONF_NAME]} Zone 2",
+                            max_volume=config.get(CONF_MAX_VOLUME),
+                            receiver_max_volume=config.get(CONF_RECEIVER_MAX_VOLUME),
+                        ))
+                    if zones.get("zone3"):
+                        hosts.append(OnkyoDeviceZone(
+                            "3",
+                            recv,
+                            config.get(CONF_SOURCES),
+                            name=f"{config[CONF_NAME]} Zone 3",
+                            max_volume=config.get(CONF_MAX_VOLUME),
+                            receiver_max_volume=config.get(CONF_RECEIVER_MAX_VOLUME),
+                        ))
+                    break
+            else:
+                _LOGGER.error("Unable to locate receiver %s via discovery", host)
+        else:
         for receiver in eISCP.discover():
             if receiver.host not in KNOWN_HOSTS:
                 hosts.append(OnkyoDevice(receiver, config.get(CONF_SOURCES), name=config.get(CONF_NAME), max_volume=config.get(CONF_MAX_VOLUME), receiver_max_volume=config.get(CONF_RECEIVER_MAX_VOLUME)))
