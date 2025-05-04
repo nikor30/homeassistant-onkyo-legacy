@@ -166,7 +166,14 @@ def setup_platform(hass: HomeAssistant, config: ConfigType, add_entities: AddEnt
     else:
         for receiver in eISCP.discover():
             if receiver.host not in KNOWN_HOSTS:
-                hosts.append(OnkyoDevice(receiver, config.get(CONF_SOURCES)))
+                hosts.append(OnkyoDevice(receiver, config.get(CONF_SOURCES), name=config.get(CONF_NAME), max_volume=config.get(CONF_MAX_VOLUME), receiver_max_volume=config.get(CONF_RECEIVER_MAX_VOLUME)))
+            KNOWN_HOSTS.append(host)
+            # Attempt zone detection but guard against all errors
+            try:
+                zones = determine_zones(receiver)
+            except Exception as err:
+                _LOGGER.error("Zone detection failed, skipping additional zones: %s", err)
+                zones = {"zone2": False, "zone3": False})
                 KNOWN_HOSTS.append(receiver.host)
     add_entities(hosts, True)
 
